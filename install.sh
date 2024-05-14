@@ -311,27 +311,89 @@ sudo systemctl enable rustdesk-api
 sudo systemctl start rustdesk-api
 
 echo "Installing nginx"
-if [ "${ID}" = "debian" ] || [ "$OS" = "Ubuntu" ] || [ "$OS" = "Debian" ] || [ "${UPSTREAM_ID}" = "ubuntu" ] || [ "${UPSTREAM_ID}" = "debian" ]; then
-    sudo apt -y install nginx
-    sudo apt -y install python3-certbot-nginx
-elif [ "$OS" = "CentOS" ] || [ "$OS" = "RedHat" ] || [ "${UPSTREAM_ID}" = "rhel" ] || [ "${OS}" = "Almalinux" ] || [ "${UPSTREAM_ID}" = "Rocky*" ] ; then
-# openSUSE 15.4 fails to run the relay service and hangs waiting for it
-# Needs more work before it can be enabled
-# || [ "${UPSTREAM_ID}" = "suse" ]
-    sudo yum -y install nginx
-    sudo yum -y install python3-certbot-nginx
-elif [ "${ID}" = "arch" ] || [ "${UPSTREAM_ID}" = "arch" ]; then
-    sudo pacman -S install nginx
-    sudo pacman -S install python3-certbot-nginx
-else
-    echo "Unsupported OS"
-    # Here you could ask the user for permission to try and install anyway
-    # If they say yes, then do the install
-    # If they say no, exit the script
-    exit 1
-fi
+# Prompt user for whether Nginx and valid certificate are installed
+while true; do
+    read -p "Do you already have Nginx and a valid certificate installed? (yes/no) " certInstalled
+    case "${certInstalled}" in
+        [Yy]|[Yy][Ee][Ss])
+            certInstalled="yes"
+            break
+            ;;
+        [Nn]|[Nn][Oo])
+            certInstalled="no"
+            break
+            ;;
+        *)
+            echo "Please enter only 'yes' or 'no'."
+            ;;
+    esac
+done
 
+if [ "${certInstalled}" = "yes" ]; then
+    echo "Certificates already installed. Skipping installation of Nginx and Certbot."
+    # Prompt user for certificate and key file paths
+    read -p "Enter the path to your .crt and .key files (e.g., /root/example.com): " cert_path
+
+    # Extract file name from the given path
+file_name=$(basename "$cert_path")
+
+# Get directory part of the path
+directory=$(dirname "$cert_path")
+
+# Construct full paths for .crt and .key files
+crt_file="${directory}/${file_name}.crt"
+key_file="${directory}/${file_name}.key"
+
+# Nginx configuration
 rustdesknginx="$(
+  cat <<EOF
+server {
+    listen 80;
+    server_name ${wanip};
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${wanip};
+
+    ssl_certificate $crt_file;
+    ssl_certificate_key $key_file;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+
+EOF
+)"
+
+else
+    if [ "${ID}" = "debian" ] || [ "$OS" = "Ubuntu" ] || [ "$OS" = "Debian" ] || [ "${UPSTREAM_ID}" = "ubuntu" ] || [ "${UPSTREAM_ID}" = "debian" ]; then
+        sudo apt -y install nginx
+        sudo apt -y install python3-certbot-nginx
+    elif [ "$OS" = "CentOS" ] || [ "$OS" = "RedHat" ] || [ "${UPSTREAM_ID}" = "rhel" ] || [ "${OS}" = "Almalinux" ] || [ "${UPSTREAM_ID}" = "Rocky*" ] ; then
+    # openSUSE 15.4 fails to run the relay service and hangs waiting for it
+    # Needs more work before it can be enabled
+    # || [ "${UPSTREAM_ID}" = "suse" ]
+        sudo yum -y install nginx
+        sudo yum -y install python3-certbot-nginx
+    elif [ "${ID}" = "arch" ] || [ "${UPSTREAM_ID}" = "arch" ]; then
+        sudo pacman -S install nginx
+        sudo pacman -S install python3-certbot-nginx
+    else
+        echo "Unsupported OS"
+        # Here you could ask the user for permission to try and install anyway
+        # If they say yes, then do the install
+        # If they say no, exit the script
+        exit 1
+    fi
+
+    rustdesknginx="$(
   cat <<EOF
 server {
   server_name ${wanip};
@@ -345,6 +407,8 @@ server {
 }
 EOF
 )"
+fi
+
 echo "${rustdesknginx}" | sudo tee /etc/nginx/sites-available/rustdesk.conf >/dev/null
 
 # Check for nginx default files
@@ -363,7 +427,9 @@ sudo ufw allow 443/tcp
 sudo ufw enable 
 sudo ufw reload
 
-sudo certbot --nginx -d ${wanip}
+if [ "${certInstalled}" = "no" ]; then
+    sudo certbot --nginx -d ${wanip}
+fi
 
 echo "Grabbing installers"
 string="{\"host\":\"${wanip}\",\"key\":\"${key}\",\"api\":\"https://${wanip}\"}"
@@ -372,7 +438,32 @@ string64rev=$(echo -n "$string64" | rev)
 
 echo "$string64rev"
 
-wget -O /opt/rustdesk-api-server/static/configs/rustdesk-licensed-$string64rev.exe https://github.com/rustdesk/rustdesk/releases/download/1.2.2/rustdesk-1.2.2-x86_64.exe 
+# Fetch the latest release information for Rustdesk using GitHub API
+release_info=$(wget -O- https://api.github.com/repos/rustdesk/rustdesk/releases/latest)
+
+# Extract the download URL for the executable
+download_url=$(echo "$release_info" | grep "browser_download_url" | head -n 1 | cut -d '"' -f 4)
+
+# Extract the filename from the download URL
+filename=$(basename "$download_url")
+
+# Set the destination directory
+dest_dir="/opt/rustdesk-api-server/static/configs"
+
+# Make sure the destination directory exists
+mkdir -p "$dest_dir"
+
+# Download the executable to the destination directory
+wget -O "$dest_dir/rustdesk-licensed-${string64rev}.exe" "$download_url"
+
+# Exit if the download fails
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to download $filename"
+    exit 1
+fi
+
+# Download successful
+echo "Downloaded $filename to $dest_dir"
 
 sed -i "s|secure-string|${string64rev}|g" /opt/rustdesk-api-server/api/templates/installers.html
 sed -i "s|UniqueKey|${key}|g" /opt/rustdesk-api-server/api/templates/installers.html
