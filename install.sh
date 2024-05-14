@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Check for root privileges
+if [ "${EUID}" -ne 0 ]; then
+    echo "Please run this script as root (sudo ./${0})"
+    exit 1
+fi
+
 # Get username
 usern=$(whoami)
 admintoken=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c16)
@@ -10,19 +16,19 @@ ARCH=$(uname -m)
 if [ -d "/opt/rustdesk-api-server/" ]; then
     echo "Please remove /opt/rustdesk-api-server/"
     echo "Use rm -rf /opt/rustdesk-api-server/ and run this script again"
-    exit
+    exit 1
 fi
 
 # Check the installed Python version
 PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
 
 # Extract major and minor version (e.g., 3.8 from Python 3.8.5)
-PYTHON_MAJOR_MINOR=$(echo $PYTHON_VERSION | cut -d. -f1,2)
+PYTHON_MAJOR_MINOR=$(echo "${PYTHON_VERSION}" | cut -d. -f1,2)
 
 echo -ne "Enter your preferred domain/DNS address: "
-read wanip
+read -r wanip
 # Check wanip is valid domain
-if ! [[ $wanip =~ ^[a-zA-Z0-9]+([a-zA-Z0-9.-]*[a-zA-Z0-9]+)?$ ]]; then
+if ! [[ ${wanip} =~ ^[a-zA-Z0-9]+([a-zA-Z0-9.-]*[a-zA-Z0-9]+)?$ ]]; then
     echo -e "Invalid domain/DNS address"
     exit 1
 fi
@@ -31,8 +37,8 @@ fi
 if [ -f /etc/os-release ]; then
     # freedesktop.org and systemd
     . /etc/os-release
-    OS=$NAME
-    VER=$VERSION_ID
+    OS=${NAME}
+    VER=${VERSION_ID}
     UPSTREAM_ID=${ID_LIKE,,}
 
     # Fallback to ID_LIKE if ID was not 'ubuntu' or 'debian'
@@ -47,8 +53,8 @@ elif type lsb_release >/dev/null 2>&1; then
 elif [ -f /etc/lsb-release ]; then
     # For some versions of Debian/Ubuntu without lsb_release command
     . /etc/lsb-release
-    OS=$DISTRIB_ID
-    VER=$DISTRIB_RELEASE
+    OS=${DISTRIB_ID}
+    VER=${DISTRIB_RELEASE}
 elif [ -f /etc/debian_version ]; then
     # Older Debian, Ubuntu, etc.
     OS=Debian
@@ -67,35 +73,34 @@ else
     VER=$(uname -r)
 fi
 
-
 # Output debugging info if $DEBUG set
-if [ "$DEBUG" = "true" ]; then
-    echo "OS: $OS"
-    echo "VER: $VER"
-    echo "UPSTREAM_ID: $UPSTREAM_ID"
+if [ "${DEBUG}" = "true" ]; then
+    echo "OS: ${OS}"
+    echo "VER: ${VER}"
+    echo "UPSTREAM_ID: ${UPSTREAM_ID}"
     exit 0
 fi
 
 # Setup prereqs for server
 # Common named prereqs
-PREREQ="curl wget unzip tar git qrencode python$PYTHON_MAJOR_MINOR-venv"
-PREREQDEB="dnsutils ufw "
+PREREQ="curl wget unzip tar git qrencode python${PYTHON_MAJOR_MINOR}-venv"
+PREREQDEB="dnsutils ufw"
 PREREQRPM="bind-utils"
 PREREQARCH="bind"
 
 echo "Installing prerequisites"
 if [ "${ID}" = "debian" ] || [ "$OS" = "Ubuntu" ] || [ "$OS" = "Debian" ] || [ "${UPSTREAM_ID}" = "debian" ] || [ "${UPSTREAM_ID}" = "ubuntu" ]; then
-    sudo apt update -qq
-    sudo apt-get install -y ${PREREQ} ${PREREQDEB} # git
+    apt update -qq
+    apt-get install -y ${PREREQ} ${PREREQDEB} # git
 elif [ "$OS" = "CentOS" ] || [ "$OS" = "RedHat" ] || [ "${UPSTREAM_ID}" = "rhel" ] || [ "${OS}" = "Almalinux" ] || [ "${UPSTREAM_ID}" = "Rocky*" ] ; then
 # openSUSE 15.4 fails to run the relay service and hangs waiting for it
 # Needs more work before it can be enabled
 # || [ "${UPSTREAM_ID}" = "suse" ]
-    sudo yum update -y
-    sudo yum install -y ${PREREQ} ${PREREQRPM} # git
+    yum update -y
+    yum install -y ${PREREQ} ${PREREQRPM} # git
 elif [ "${ID}" = "arch" ] || [ "${UPSTREAM_ID}" = "arch" ]; then
-    sudo pacman -Syu
-    sudo pacman -S ${PREREQ} ${PREREQARCH}
+    pacman -Syu
+    pacman -S ${PREREQ} ${PREREQARCH}
 else
     echo "Unsupported OS"
     # Here you could ask the user for permission to try and install anyway
@@ -105,155 +110,103 @@ else
 fi
 
 # Setting up firewall
-sudo ufw allow 21115:21119/tcp
-sudo ufw allow 22/tcp
-sudo ufw allow 21116/udp
-sudo ufw enable
+ufw allow 21115:21119/tcp
+ufw allow 22/tcp
+ufw allow 21116/udp
+ufw enable
 
 # Make folder /var/lib/rustdesk-server/
-if [ ! -d "/var/lib/rustdesk-server" ]; then
-    echo "Creating /var/lib/rustdesk-server"
-    sudo mkdir -p /var/lib/rustdesk-server/
-fi
+mkdir -p "/var/lib/rustdesk-server"
+chown "${usern}" -R /var/lib/rustdesk-server || exit 1
 
-sudo chown "${usern}" -R /var/lib/rustdesk-server
 cd /var/lib/rustdesk-server/ || exit 1
 
-
 # Download latest version of RustDesk
-RDLATEST=$(curl https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest -s | grep "tag_name"| awk '{print substr($2, 2, length($2)-3) }')
+RDLATEST=$(curl -s https://api.github.com/repos/rustdesk/rustdesk-server/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3) }')
 
 echo "Installing RustDesk Server"
-if [ "${ARCH}" = "x86_64" ] ; then
-wget https://github.com/rustdesk/rustdesk-server/releases/download/${RDLATEST}/rustdesk-server-linux-amd64.zip
-unzip rustdesk-server-linux-amd64.zip
-sudo mv amd64/hbbr /usr/bin/
-sudo mv amd64/hbbs /usr/bin/
-rm -rf amd64/
-elif [ "${ARCH}" = "armv7l" ] ; then
-wget "https://github.com/rustdesk/rustdesk-server/releases/download/${RDLATEST}/rustdesk-server-linux-armv7.zip"
-unzip rustdesk-server-linux-armv7.zip
-sudo mv armv7/hbbr /usr/bin/
-sudo mv armv7/hbbs /usr/bin/
-rm -rf armv7/
-elif [ "${ARCH}" = "aarch64" ] ; then
-wget "https://github.com/rustdesk/rustdesk-server/releases/download/${RDLATEST}/rustdesk-server-linux-arm64v8.zip"
-unzip rustdesk-server-linux-arm64v8.zip
-sudo mv arm64v8/hbbr /usr/bin/
-sudo mv arm64v8/hbbs /usr/bin/
-rm -rf arm64v8/
-fi
+wget "https://github.com/rustdesk/rustdesk-server/releases/download/${RDLATEST}/rustdesk-server-linux-${ARCH}.zip"
 
-sudo chmod +x /usr/bin/hbbs
-sudo chmod +x /usr/bin/hbbr
 
+unzip -q "rustdesk-server-linux-${ARCH}.zip"
+mv "${ARCH}/hbbr" "${ARCH}/hbbs" /usr/bin/
+rm -rf "${ARCH}"
+
+chmod +x /usr/bin/hbbs /usr/bin/hbbr
 
 # Make folder /var/log/rustdesk-server/
-if [ ! -d "/var/log/rustdesk-server" ]; then
-    echo "Creating /var/log/rustdesk-server"
-    sudo mkdir -p /var/log/rustdesk-server/
-fi
-sudo chown "${usern}" -R /var/log/rustdesk-server/
+mkdir -p "/var/log/rustdesk-server"
+chown "${usern}" -R /var/log/rustdesk-server
 
 # Setup systemd to launch hbbs
-rustdeskhbbs="$(cat << EOF
+# Add systemd unit file for hbbs and hbbr
+
+# Ensure correct service names are used
+service_names=("hbbs" "hbbr")
+
+for service_name in "${service_names[@]}"; do
+    cat > "/etc/systemd/system/rustdesk-${service_name}.service" <<EOF
 [Unit]
-Description=RustDesk Signal Server
+Description=RustDesk \${service_name^} Server
 [Service]
 Type=simple
 LimitNOFILE=1000000
-ExecStart=/usr/bin/hbbs -r $wanip -k _
+ExecStart=/usr/bin/\${service_name} -r ${wanip} -k _
 WorkingDirectory=/var/lib/rustdesk-server/
 Environment=ALWAYS_USE_RELAY=Y
 User=${usern}
 Group=${usern}
 Restart=always
-StandardOutput=append:/var/log/rustdesk-server/hbbs.log
-StandardError=append:/var/log/rustdesk-server/hbbs.error
-# Restart service after 10 seconds if node service crashes
+StandardOutput=append:/var/log/rustdesk-server/\${service_name}.log
+StandardError=append:/var/log/rustdesk-server/\${service_name}.error
 RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-)"
-echo "${rustdeskhbbs}" | sudo tee /etc/systemd/system/rustdesk-hbbs.service > /dev/null
-sudo systemctl daemon-reload
-sudo systemctl enable rustdesk-hbbs.service
-sudo systemctl start rustdesk-hbbs.service
-
-# Setup systemd to launch hbbr
-rustdeskhbbr="$(cat << EOF
-[Unit]
-Description=RustDesk Relay Server
-[Service]
-Type=simple
-LimitNOFILE=1000000
-ExecStart=/usr/bin/hbbr -k _
-WorkingDirectory=/var/lib/rustdesk-server/
-User=${usern}
-Group=${usern}
-Restart=always
-StandardOutput=append:/var/log/rustdesk-server/hbbr.log
-StandardError=append:/var/log/rustdesk-server/hbbr.error
-# Restart service after 10 seconds if node service crashes
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-EOF
-)"
-echo "${rustdeskhbbr}" | sudo tee /etc/systemd/system/rustdesk-hbbr.service > /dev/null
-sudo systemctl daemon-reload
-sudo systemctl enable rustdesk-hbbr.service
-sudo systemctl start rustdesk-hbbr.service
-
-while ! [[ $CHECK_RUSTDESK_READY ]]; do
-  CHECK_RUSTDESK_READY=$(sudo systemctl status rustdesk-hbbr.service | grep "Active: active (running)")
-  echo -ne "RustDesk Relay not ready yet...${NC}\n"
-  sleep 3
 done
 
+systemctl daemon-reload
+
+# Enable and start services
+for service_name in "${service_names[@]}"; do
+    systemctl enable --now "rustdesk-${service_name}.service"
+done
+
+# Ensure services are ready
+for service_name in "${service_names[@]}"; do
+    while ! systemctl is-active --quiet "rustdesk-${service_name}.service"; do
+        echo -ne "RustDesk \${service_name^} not ready yet...\n"
+        sleep 3
+    done
+done
+
+# Retrieve public key file and key
 pubname=$(find /var/lib/rustdesk-server/ -name "*.pub")
 key=$(cat "${pubname}")
 
 echo "Tidying up install"
-if [ "${ARCH}" = "x86_64" ] ; then
-rm rustdesk-server-linux-amd64.zip
-rm -rf amd64
-elif [ "${ARCH}" = "armv7l" ] ; then
-rm rustdesk-server-linux-armv7.zip
-rm -rf armv7
-elif [ "${ARCH}" = "aarch64" ] ; then
-rm rustdesk-server-linux-arm64v8.zip
-rm -rf arm64v8
-fi
+rm -rf rustdesk-server-linux-${ARCH}.zip ${ARCH}
 
 cd /opt
 
-sudo git clone https://github.com/infiniteremote/rustdesk-api-server.git
+git clone https://github.com/infiniteremote/rustdesk-api-server.git
 
-cd rustdesk-api-server
-
-sudo chown -R ${usern}:${usern} /opt/rustdesk-api-server/
+chown -R ${usern}:${usern} /opt/rustdesk-api-server/
 
 
 SECRET_KEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 80 | head -n 1)
 UNISALT=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 24 | head -n 1)
 
-secret_config="$(
-  cat <<EOF
+cat <<EOF > /opt/rustdesk-api-server/rustdesk_server_api/secret_config.py
 SECRET_KEY = "${SECRET_KEY}"
 SALT_CRED = "${UNISALT}"
 CSRF_TRUSTED_ORIGINS = ["https://${wanip}"]
 EOF
-)"
-echo "${secret_config}" >/opt/rustdesk-api-server/rustdesk_server_api/secret_config.py
 
-if [ ! -d "/var/log/rustdesk-server-api" ]; then
-    echo "Creating /var/log/rustdesk-server-api"
-    sudo mkdir -p /var/log/rustdesk-server-api/
-fi
+mkdir -p /var/log/rustdesk-server-api/
 
-sudo chown -R ${usern}:${usern} /var/log/rustdesk-server-api/
+
+chown -R ${usern}:${usern} /var/log/rustdesk-server-api/
 
 cd /opt/rustdesk-api-server/api
 python3 -m venv env
@@ -285,7 +238,7 @@ accesslog = "/var/log/rustdesk-server-api/access.log"
 loglevel = "info"
 EOF
 )"
-echo "${apiconfig}" | sudo tee /opt/rustdesk-api-server/api/api_config.py >/dev/null
+echo "${apiconfig}" > /opt/rustdesk-api-server/api/api_config.py
 
 apiservice="$(
   cat <<EOF
@@ -304,11 +257,10 @@ RestartSec=10s
 WantedBy=multi-user.target
 EOF
 )"
-echo "${apiservice}" | sudo tee /etc/systemd/system/rustdesk-api.service >/dev/null
+echo "${apiservice}" > /etc/systemd/system/rustdesk-api.service
 
-sudo systemctl daemon-reload
-sudo systemctl enable rustdesk-api
-sudo systemctl start rustdesk-api
+systemctl daemon-reload
+systemctl enable --now rustdesk-api
 
 echo "Installing nginx"
 # Prompt user for whether Nginx and valid certificate are installed
@@ -335,30 +287,29 @@ if [ "${certInstalled}" = "yes" ]; then
     read -p "Enter the path to your .crt and .key files (e.g., /root/example.com): " cert_path
 
     # Extract file name from the given path
-file_name=$(basename "$cert_path")
+    file_name=$(basename "${cert_path}")
 
-# Get directory part of the path
-directory=$(dirname "$cert_path")
+    # Get directory part of the path
+    directory=$(dirname "${cert_path}")
 
-# Construct full paths for .crt and .key files
-crt_file="${directory}/${file_name}.crt"
-key_file="${directory}/${file_name}.key"
+    # Construct full paths for .crt and .key files
+    crt_file="${directory}/${file_name}.crt"
+    key_file="${directory}/${file_name}.key"
 
-# Nginx configuration
-rustdesknginx="$(
-  cat <<EOF
+    # Nginx configuration
+    cat <<EOF > /etc/nginx/sites-available/rustdesk.conf
 server {
     listen 80;
     server_name ${wanip};
-    return 301 https://$server_name$request_uri;
+    return 301 https://\$server_name\$request_uri;
 }
 
 server {
     listen 443 ssl;
     server_name ${wanip};
 
-    ssl_certificate $crt_file;
-    ssl_certificate_key $key_file;
+    ssl_certificate ${crt_file};
+    ssl_certificate_key ${key_file};
 
     location / {
         proxy_pass http://127.0.0.1:8000/;
@@ -368,23 +319,24 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
-
 EOF
-)"
+
 
 else
-    if [ "${ID}" = "debian" ] || [ "$OS" = "Ubuntu" ] || [ "$OS" = "Debian" ] || [ "${UPSTREAM_ID}" = "ubuntu" ] || [ "${UPSTREAM_ID}" = "debian" ]; then
-        sudo apt -y install nginx
-        sudo apt -y install python3-certbot-nginx
-    elif [ "$OS" = "CentOS" ] || [ "$OS" = "RedHat" ] || [ "${UPSTREAM_ID}" = "rhel" ] || [ "${OS}" = "Almalinux" ] || [ "${UPSTREAM_ID}" = "Rocky*" ] ; then
+    echo "Installing nginx and Certbot"
+
+    if [ "${ID}" = "debian" ] || [ "${OS}" = "Ubuntu" ] || [ "${OS}" = "Debian" ] || [ "${UPSTREAM_ID}" = "ubuntu" ] || [ "${UPSTREAM_ID}" = "debian" ]; then
+        apt -y install nginx
+        apt -y install python3-certbot-nginx
+    elif [ "${OS}" = "CentOS" ] || [ "${OS}" = "RedHat" ] || [ "${UPSTREAM_ID}" = "rhel" ] || [ "${OS}" = "Almalinux" ] || [ "${UPSTREAM_ID}" = "Rocky*" ] ; then
     # openSUSE 15.4 fails to run the relay service and hangs waiting for it
     # Needs more work before it can be enabled
     # || [ "${UPSTREAM_ID}" = "suse" ]
-        sudo yum -y install nginx
-        sudo yum -y install python3-certbot-nginx
+        yum -y install nginx
+        yum -y install python3-certbot-nginx
     elif [ "${ID}" = "arch" ] || [ "${UPSTREAM_ID}" = "arch" ]; then
-        sudo pacman -S install nginx
-        sudo pacman -S install python3-certbot-nginx
+        pacman -S install nginx
+        pacman -S install python3-certbot-nginx
     else
         echo "Unsupported OS"
         # Here you could ask the user for permission to try and install anyway
@@ -393,77 +345,75 @@ else
         exit 1
     fi
 
-    rustdesknginx="$(
-  cat <<EOF
+
+    cat <<EOF > /etc/nginx/sites-available/rustdesk.conf
 server {
-  server_name ${wanip};
-      location / {
+    server_name ${wanip};
+    location / {
         proxy_pass http://127.0.0.1:8000/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-}
+    }
 }
 EOF
-)"
-fi
 
-echo "${rustdesknginx}" | sudo tee /etc/nginx/sites-available/rustdesk.conf >/dev/null
+fi
 
 # Check for nginx default files
-if [ "/etc/nginx/sites-available/default" ]; then
-    sudo rm /etc/nginx/sites-available/default
+if [ -f "/etc/nginx/sites-available/default" ]; then
+    rm /etc/nginx/sites-available/default
 fi
-if [ "/etc/nginx/sites-enabled/default" ]; then
-    sudo rm /etc/nginx/sites-enabled/default
+if [ -f "/etc/nginx/sites-enabled/default" ]; then
+    rm /etc/nginx/sites-enabled/default
 fi
 
-sudo ln -s /etc/nginx/sites-available/rustdesk.conf /etc/nginx/sites-enabled/rustdesk.conf
+ln -s /etc/nginx/sites-available/rustdesk.conf /etc/nginx/sites-enabled/rustdesk.conf
 
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
 
-sudo ufw enable 
-sudo ufw reload
+ufw enable 
+ufw reload
 
 if [ "${certInstalled}" = "no" ]; then
-    sudo certbot --nginx -d ${wanip}
+    certbot --nginx -d ${wanip}
 fi
 
 echo "Grabbing installers"
 string="{\"host\":\"${wanip}\",\"key\":\"${key}\",\"api\":\"https://${wanip}\"}"
-string64=$(echo -n "$string" | base64 -w 0 | tr -d '=')
-string64rev=$(echo -n "$string64" | rev)
+string64=$(echo -n "${string}" | base64 -w 0 | tr -d '=')
+string64rev=$(echo -n "${string64}" | rev)
 
-echo "$string64rev"
+echo "${string64rev}"
 
 # Fetch the latest release information for Rustdesk using GitHub API
 release_info=$(wget -O- https://api.github.com/repos/rustdesk/rustdesk/releases/latest)
 
 # Extract the download URL for the executable
-download_url=$(echo "$release_info" | grep "browser_download_url" | head -n 1 | cut -d '"' -f 4)
+download_url=$(echo "${release_info}" | grep "browser_download_url" | head -n 1 | cut -d '"' -f 4)
 
 # Extract the filename from the download URL
-filename=$(basename "$download_url")
+filename=$(basename "${download_url}")
 
 # Set the destination directory
 dest_dir="/opt/rustdesk-api-server/static/configs"
 
 # Make sure the destination directory exists
-mkdir -p "$dest_dir"
+mkdir -p "${dest_dir}"
 
 # Download the executable to the destination directory
-wget -O "$dest_dir/rustdesk-licensed-${string64rev}.exe" "$download_url"
+wget -O "${dest_dir}/rustdesk-licensed-${string64rev}.exe" "${download_url}"
 
 # Exit if the download fails
 if [ $? -ne 0 ]; then
-    echo "Error: Failed to download $filename"
+    echo "Error: Failed to download ${filename}"
     exit 1
 fi
 
 # Download successful
-echo "Downloaded $filename to $dest_dir"
+echo "Downloaded ${filename} to ${dest_dir}"
 
 sed -i "s|secure-string|${string64rev}|g" /opt/rustdesk-api-server/api/templates/installers.html
 sed -i "s|UniqueKey|${key}|g" /opt/rustdesk-api-server/api/templates/installers.html
@@ -474,5 +424,3 @@ sed -i "s|secure-string|${string64rev}|g" /opt/rustdesk-api-server/static/config
 sed -i "s|secure-string|${string64rev}|g" /opt/rustdesk-api-server/static/configs/install-linux.sh
 
 qrencode -o /opt/rustdesk-api-server/static/configs/qrcode.png config=${string64rev}
-
-
