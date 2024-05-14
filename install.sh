@@ -2,7 +2,7 @@
 
 # Check for root privileges
 if [ "${EUID}" -ne 0 ]; then
-    echo "Please run this script as root (sudo ./${0})"
+    echo "Please run this script as root (sudo ${0})"
     exit 1
 fi
 
@@ -11,6 +11,10 @@ usern=$(whoami)
 admintoken=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c16)
 
 ARCH=$(uname -m)
+
+if [ "${ARCH}" = "x86_64" ]; then
+    ARCH="amd64"
+fi
 
 # Check for folder /opt/rustdesk-api-server/
 if [ -d "/opt/rustdesk-api-server/" ]; then
@@ -144,26 +148,45 @@ chown "${usern}" -R /var/log/rustdesk-server
 # Ensure correct service names are used
 service_names=("hbbs" "hbbr")
 
-for service_name in "${service_names[@]}"; do
-    cat > "/etc/systemd/system/rustdesk-${service_name}.service" <<EOF
+
+cat > "/etc/systemd/system/rustdesk-hbbs.service" <<EOF
 [Unit]
-Description=RustDesk \${service_name^} Server
+Description=RustDesk Signal Server
 [Service]
 Type=simple
 LimitNOFILE=1000000
-ExecStart=/usr/bin/\${service_name} -r ${wanip} -k _
+ExecStart=/usr/bin/hbbs -r ${wanip} -k _
 WorkingDirectory=/var/lib/rustdesk-server/
 Environment=ALWAYS_USE_RELAY=Y
 User=${usern}
 Group=${usern}
 Restart=always
-StandardOutput=append:/var/log/rustdesk-server/\${service_name}.log
-StandardError=append:/var/log/rustdesk-server/\${service_name}.error
+StandardOutput=append:/var/log/rustdesk-server/hbbs.log
+StandardError=append:/var/log/rustdesk-server/hbbs.error
+# Restart service after 10 seconds if node service crashes
 RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-done
+
+cat > "/etc/systemd/system/rustdesk-hbbr.service" <<EOF
+[Unit]
+Description=RustDesk Relay Server
+[Service]
+Type=simple
+LimitNOFILE=1000000
+ExecStart=/usr/bin/hbbr -k _
+WorkingDirectory=/var/lib/rustdesk-server/
+User=${usern}
+Group=${usern}
+Restart=always
+StandardOutput=append:/var/log/rustdesk-server/hbbr.log
+StandardError=append:/var/log/rustdesk-server/hbbr.error
+# Restart service after 10 seconds if node service crashes
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
+EOF
 
 systemctl daemon-reload
 
@@ -175,7 +198,7 @@ done
 # Ensure services are ready
 for service_name in "${service_names[@]}"; do
     while ! systemctl is-active --quiet "rustdesk-${service_name}.service"; do
-        echo -ne "RustDesk \${service_name^} not ready yet...\n"
+        echo -ne "RustDesk ${service_name} not ready yet...\n"
         sleep 3
     done
 done
